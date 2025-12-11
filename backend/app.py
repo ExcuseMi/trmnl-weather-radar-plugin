@@ -346,10 +346,10 @@ async def fetch_nearby_cities(lat, lon, radius_km=50):
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             # Use Nominatim's reverse geocoding to find nearby places
-            # We'll search in 8 directions at ~40km distance
+            # We'll search in 8 directions at ~80km distance to get major cities
 
             nearby_cities = []
-            distance_offset = 0.36  # ~40km
+            distance_offset = 0.72  # ~80km (0.72 degrees lat ≈ 80km)
 
             directions = [
                 (0, distance_offset, 'N'),  # North
@@ -369,13 +369,14 @@ async def fetch_nearby_cities(lat, lon, radius_km=50):
 
                 try:
                     # Reverse geocode to get place name
+                    # Use zoom=8 for larger cities (zoom=10 was too granular)
                     geocode_response = await client.get(
                         'https://nominatim.openstreetmap.org/reverse',
                         params={
                             'lat': point_lat,
                             'lon': point_lon,
                             'format': 'json',
-                            'zoom': 10,  # City/town level
+                            'zoom': 8,  # Larger area = bigger cities
                             'addressdetails': 1
                         },
                         headers={'User-Agent': 'TRMNL-Weather-Plugin/1.0'}
@@ -385,13 +386,13 @@ async def fetch_nearby_cities(lat, lon, radius_km=50):
                         place_data = geocode_response.json()
                         address = place_data.get('address', {})
 
-                        # Get city/town name (prefer city, town, village)
+                        # Prefer larger administrative divisions
                         place_name = (
                                 address.get('city') or
                                 address.get('town') or
-                                address.get('village') or
-                                address.get('municipality') or
+                                address.get('state') or
                                 address.get('county') or
+                                address.get('region') or
                                 place_data.get('name', f'{direction}')
                         )
 
