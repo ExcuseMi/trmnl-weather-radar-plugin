@@ -355,9 +355,32 @@ async def fetch_forecast(lat, lon):
         return None
 
 
-async def fetch_nearby_cities(lat, lon, radius_km=80):
-    """Fetch actual major cities using Overpass API and get their weather"""
+async def fetch_nearby_cities(lat, lon, zoom_level=8):
+    """
+    Fetch actual major cities using Overpass API and get their weather
+    Radius scales based on zoom level:
+    - zoom 7: ~320km view → 150km radius
+    - zoom 8: ~160km view → 100km radius
+    - zoom 9: ~80km view → 60km radius
+    - zoom 10: ~40km view → 30km radius
+    """
     try:
+        # Calculate radius based on zoom level
+        # Formula: radius = base_distance / (2 ^ (zoom - 8))
+        # This ensures cities spread across the visible area at any zoom
+        base_radius = 100  # Base radius at zoom 8
+        radius_km = int(base_radius * (2 ** (8 - zoom_level)))
+
+        # Clamp radius to reasonable bounds
+        radius_km = max(30, min(200, radius_km))
+
+        # Scale minimum distances based on radius
+        min_distance_from_center = int(radius_km * 0.20)  # 20% of radius
+        min_distance_between_cities = int(radius_km * 0.15)  # 15% of radius
+
+        logger.info(
+            f"Zoom {zoom_level}: using radius {radius_km}km, min_from_center {min_distance_from_center}km, min_between {min_distance_between_cities}km")
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Use Overpass API to find cities/towns within radius
             # Query for places with population data or are marked as cities/towns
@@ -406,14 +429,51 @@ async def fetch_nearby_cities(lat, lon, radius_km=80):
                     # Sort by population descending
                     cities_with_pop.sort(key=lambda x: x['population'], reverse=True)
 
-                    # Take top 8 most populous
-                    top_cities = cities_with_pop[:8]
+                    # Filter cities to ensure good spread across map
+                    # Distances scale with zoom level
 
-                    logger.info(f"Selected top {len(top_cities)} cities by population")
+                    def distance_km(lat1, lon1, lat2, lon2):
+                        """Calculate distance between two points in km"""
+                        from math import radians, sin, cos, sqrt, atan2
+                        R = 6371  # Earth radius in km
+
+                        lat1_rad = radians(lat1)
+                        lat2_rad = radians(lat2)
+                        delta_lat = radians(lat2 - lat1)
+                        delta_lon = radians(lon2 - lon1)
+
+                        a = sin(delta_lat / 2) ** 2 + cos(lat1_rad) * cos(lat2_rad) * sin(delta_lon / 2) ** 2
+                        c = 2 * atan2(sqrt(a), sqrt(1 - a))
+
+                        return R * c
+
+                    selected_cities = []
+                    for city in cities_with_pop:
+                        # Skip if too close to center
+                        dist_from_center = distance_km(lat, lon, city['lat'], city['lon'])
+                        if dist_from_center < min_distance_from_center:
+                            continue
+
+                        # Skip if too close to already selected cities
+                        too_close = False
+                        for selected in selected_cities:
+                            dist = distance_km(selected['lat'], selected['lon'], city['lat'], city['lon'])
+                            if dist < min_distance_between_cities:
+                                too_close = True
+                                break
+
+                        if not too_close:
+                            selected_cities.append(city)
+
+                        # Stop when we have 8 cities
+                        if len(selected_cities) >= 8:
+                            break
+
+                    logger.info(f"Selected {len(selected_cities)} well-spread cities by population")
 
                     # Fetch weather for all cities in parallel
                     weather_tasks = []
-                    for city in top_cities:
+                    for city in selected_cities:
                         weather_tasks.append(fetch_weather(city['lat'], city['lon']))
 
                     weather_results = await asyncio.gather(*weather_tasks, return_exceptions=True)
@@ -424,7 +484,7 @@ async def fetch_nearby_cities(lat, lon, radius_km=80):
                         if isinstance(result, Exception) or result is None:
                             continue
 
-                        city = top_cities[i]
+                        city = selected_cities[i]
                         nearby_weather.append({
                             'lat': round(city['lat'], 2),
                             'lon': round(city['lon'], 2),
@@ -444,14 +504,14 @@ async def fetch_nearby_cities(lat, lon, radius_km=80):
                 pass
 
             # Fallback: Use the old directional reverse geocoding method
-            return await fetch_nearby_cities_fallback(lat, lon)
+            return await fetch_nearby_cities_fallback(lat, lon, radius_km)
 
     except Exception as e:
         logger.error(f"Error fetching nearby cities: {e}")
         return []
 
 
-async def fetch_nearby_cities_fallback(lat, lon):
+async def fetch_nearby_cities_fallback(lat, lon, radius_km):
     """Fallback method using directional reverse geocoding"""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -671,9 +731,14 @@ async def get_weather():
     Query params:
       - address: location address
       - lang: language code (optional, default: en)
+      - zoom_level: map zoom level (optional, default: 8, range: 1-18)
     """
     address = request.args.get('address', type=str)
     lang = request.args.get('lang', 'en', type=str)
+    zoom_level = request.args.get('zoom_level', 8, type=int)
+
+    # Clamp zoom level to valid range
+    zoom_level = max(1, min(18, zoom_level))
 
     if not address:
         return jsonify({'error': translate('error_missing_address', lang)}), 400
@@ -687,13 +752,13 @@ async def get_weather():
     lon = geocode_result['lon']
     location_name = geocode_result['display_name']
 
-    logger.info(f"Using geocoded coordinates: {lat}, {lon}")
+    logger.info(f"Using geocoded coordinates: {lat}, {lon} (zoom: {zoom_level})")
 
     # Fetch weather, forecast, and nearby cities in parallel
     weather_data, forecast_data, nearby_data = await asyncio.gather(
         fetch_weather(lat, lon),
         fetch_forecast(lat, lon),
-        fetch_nearby_cities(lat, lon),
+        fetch_nearby_cities(lat, lon, zoom_level),
         return_exceptions=True
     )
 
