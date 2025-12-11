@@ -128,6 +128,18 @@ async def init_db():
             )
         ''')
 
+        # Overpass API cache (for nearby cities)
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS overpass_cache (
+                lat REAL,
+                lon REAL,
+                radius_km INTEGER,
+                cities_json TEXT,
+                cached_at TEXT,
+                PRIMARY KEY (lat, lon, radius_km)
+            )
+        ''')
+
         await db.commit()
 
 
@@ -383,6 +395,89 @@ async def fetch_nearby_cities(lat, lon, zoom_level=8):
         logger.info(
             f"Zoom {zoom_level}: using radius {radius_km}km, min_from_center {min_distance_from_center}km, min_between {min_distance_between_cities}km")
 
+        # Check cache first (cache for 24 hours since city data doesn't change often)
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                'SELECT cities_json, cached_at FROM overpass_cache WHERE lat = ? AND lon = ? AND radius_km = ?',
+                (round(lat, 2), round(lon, 2), radius_km)
+            )
+            row = await cursor.fetchone()
+
+            if row:
+                cached_json, cached_at = row
+                cache_time = datetime.fromisoformat(cached_at)
+                cache_age = (datetime.now() - cache_time).total_seconds() / 60
+
+                # Use cache if less than 24 hours old (1440 minutes)
+                if cache_age < 1440:
+                    logger.info(f"Overpass cache hit for ({lat}, {lon}, {radius_km}km), age: {cache_age:.1f}m")
+                    cities_with_pop = json.loads(cached_json)
+
+                    # Skip to filtering step
+                    def distance_km(lat1, lon1, lat2, lon2):
+                        """Calculate distance between two points in km"""
+                        from math import radians, sin, cos, sqrt, atan2
+                        R = 6371  # Earth radius in km
+
+                        lat1_rad = radians(lat1)
+                        lat2_rad = radians(lat2)
+                        delta_lat = radians(lat2 - lat1)
+                        delta_lon = radians(lon2 - lon1)
+
+                        a = sin(delta_lat / 2) ** 2 + cos(lat1_rad) * cos(lat2_rad) * sin(delta_lon / 2) ** 2
+                        c = 2 * atan2(sqrt(a), sqrt(1 - a))
+
+                        return R * c
+
+                    selected_cities = []
+                    for city in cities_with_pop:
+                        # Skip if too close to center
+                        dist_from_center = distance_km(lat, lon, city['lat'], city['lon'])
+                        if dist_from_center < min_distance_from_center:
+                            continue
+
+                        # Skip if too close to already selected cities
+                        too_close = False
+                        for selected in selected_cities:
+                            dist = distance_km(selected['lat'], selected['lon'], city['lat'], city['lon'])
+                            if dist < min_distance_between_cities:
+                                too_close = True
+                                break
+
+                        if not too_close:
+                            selected_cities.append(city)
+
+                        # Stop when we have enough cities
+                        if len(selected_cities) >= 20:
+                            break
+
+                    # Fetch weather for cached cities
+                    weather_tasks = []
+                    for city in selected_cities:
+                        weather_tasks.append(fetch_weather(city['lat'], city['lon']))
+
+                    weather_results = await asyncio.gather(*weather_tasks, return_exceptions=True)
+
+                    # Combine city names with weather data
+                    nearby_weather = []
+                    for i, result in enumerate(weather_results):
+                        if isinstance(result, Exception) or result is None:
+                            continue
+
+                        city = selected_cities[i]
+                        nearby_weather.append({
+                            'lat': round(city['lat'], 2),
+                            'lon': round(city['lon'], 2),
+                            'name': city['name'],
+                            'temperature': result.get('temperature'),
+                            'weather_code': result.get('weather_code'),
+                            'population': city['population']
+                        })
+
+                    logger.info(
+                        f"Fetched weather for {len(nearby_weather)} nearby cities (from cache): {[c['name'] for c in nearby_weather]}")
+                    return nearby_weather
+
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Use Overpass API to find cities/towns within radius
             # Query for places with population data or are marked as cities/towns
@@ -431,6 +526,20 @@ async def fetch_nearby_cities(lat, lon, zoom_level=8):
                     # Sort by population descending
                     cities_with_pop.sort(key=lambda x: x['population'], reverse=True)
 
+                    # Cache the Overpass results (24 hour cache)
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute('''
+                            INSERT OR REPLACE INTO overpass_cache (lat, lon, radius_km, cities_json, cached_at)
+                            VALUES (?, ?, ?, ?, ?)
+                        ''', (
+                            round(lat, 2),
+                            round(lon, 2),
+                            radius_km,
+                            json.dumps(cities_with_pop),
+                            datetime.now().isoformat()
+                        ))
+                        await db.commit()
+
                     # Filter cities to ensure good spread across map
                     # Distances scale with zoom level
 
@@ -467,8 +576,8 @@ async def fetch_nearby_cities(lat, lon, zoom_level=8):
                         if not too_close:
                             selected_cities.append(city)
 
-                        # Stop when we have 8 cities
-                        if len(selected_cities) >= 8:
+                        # Stop when we have enough cities
+                        if len(selected_cities) >= 20:  # Increased from 8 to 20
                             break
 
                     logger.info(f"Selected {len(selected_cities)} well-spread cities by population")
@@ -789,6 +898,150 @@ async def get_weather():
     }
 
     return jsonify(response)
+
+
+@app.route('/api/weather-grid', methods=['POST'])
+@require_trmnl_ip
+async def get_weather_grid():
+    """
+    Get weather data for multiple locations and calculate optimal map bounds
+
+    Request body:
+    {
+      "locations": ["Brussels", "Paris", "Amsterdam", "London"],
+      "lang": "en" (optional)
+    }
+
+    Response:
+    {
+      "locations": [
+        {"name": "Brussels", "lat": 50.85, "lon": 4.35, "temperature": 7, "weather_code": 0},
+        ...
+      ],
+      "map": {
+        "center_lat": 51.2,
+        "center_lon": 2.5,
+        "zoom": 7,
+        "bounds": {"north": 52.5, "south": 48.8, "east": 6.1, "west": -0.1}
+      }
+    }
+    """
+    try:
+        data = request.get_json()
+        if not data or 'locations' not in data:
+            return jsonify({'error': 'Missing required field: locations'}), 400
+
+        locations = data.get('locations', [])
+        lang = data.get('lang', 'en')
+
+        if not locations or not isinstance(locations, list):
+            return jsonify({'error': 'locations must be a non-empty array'}), 400
+
+        if len(locations) > 50:
+            return jsonify({'error': 'Maximum 50 locations allowed'}), 400
+
+        logger.info(f"Weather grid request for {len(locations)} locations")
+
+        # Geocode all locations in parallel
+        geocode_tasks = [geocode_address(loc) for loc in locations]
+        geocode_results = await asyncio.gather(*geocode_tasks, return_exceptions=True)
+
+        # Filter successful geocodes
+        valid_locations = []
+        for i, result in enumerate(geocode_results):
+            if isinstance(result, Exception) or result is None:
+                logger.warning(f"Failed to geocode: {locations[i]}")
+                continue
+            valid_locations.append({
+                'name': locations[i],
+                'lat': result['lat'],
+                'lon': result['lon']
+            })
+
+        if not valid_locations:
+            return jsonify({'error': 'Could not geocode any locations'}), 400
+
+        logger.info(f"Successfully geocoded {len(valid_locations)}/{len(locations)} locations")
+
+        # Fetch weather for all locations in parallel
+        weather_tasks = [fetch_weather(loc['lat'], loc['lon']) for loc in valid_locations]
+        weather_results = await asyncio.gather(*weather_tasks, return_exceptions=True)
+
+        # Combine location data with weather
+        location_data = []
+        for i, weather in enumerate(weather_results):
+            if isinstance(weather, Exception) or weather is None:
+                continue
+
+            loc = valid_locations[i]
+            location_data.append({
+                'name': loc['name'],
+                'lat': round(loc['lat'], 4),
+                'lon': round(loc['lon'], 4),
+                'temperature': weather.get('temperature'),
+                'weather_code': weather.get('weather_code'),
+                'humidity': weather.get('humidity'),
+                'wind_speed': weather.get('wind_speed'),
+                'precipitation': weather.get('precipitation')
+            })
+
+        # Calculate optimal map bounds and zoom
+        lats = [loc['lat'] for loc in location_data]
+        lons = [loc['lon'] for loc in location_data]
+
+        min_lat, max_lat = min(lats), max(lats)
+        min_lon, max_lon = min(lons), max(lons)
+
+        # Center point
+        center_lat = (min_lat + max_lat) / 2
+        center_lon = (min_lon + max_lon) / 2
+
+        # Calculate distance span to determine zoom level
+        lat_span = max_lat - min_lat
+        lon_span = max_lon - min_lon
+        max_span = max(lat_span, lon_span)
+
+        # Estimate zoom level based on span
+        # Add 20% padding
+        max_span_with_padding = max_span * 1.2
+
+        if max_span_with_padding > 45:
+            zoom = 4
+        elif max_span_with_padding > 22:
+            zoom = 5
+        elif max_span_with_padding > 11:
+            zoom = 6
+        elif max_span_with_padding > 5.5:
+            zoom = 7
+        elif max_span_with_padding > 2.7:
+            zoom = 8
+        elif max_span_with_padding > 1.4:
+            zoom = 9
+        else:
+            zoom = 10
+
+        logger.info(f"Generated weather grid for {len(location_data)} locations (zoom: {zoom})")
+
+        response = {
+            'locations': location_data,
+            'map': {
+                'center_lat': round(center_lat, 4),
+                'center_lon': round(center_lon, 4),
+                'zoom': zoom,
+                'bounds': {
+                    'north': round(max_lat, 4),
+                    'south': round(min_lat, 4),
+                    'east': round(max_lon, 4),
+                    'west': round(min_lon, 4)
+                }
+            }
+        }
+
+        return jsonify(response)
+
+    except Exception as e:
+        logger.error(f"Error in weather grid endpoint: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
 
 async def startup():
