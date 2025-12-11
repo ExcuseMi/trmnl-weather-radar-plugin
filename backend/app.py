@@ -927,12 +927,28 @@ async def get_weather_grid():
     }
     """
     try:
-        data = request.get_json()
+        # Log raw request details
+        logger.info(f"Weather grid request received")
+        logger.info(f"Content-Type: {request.content_type}")
+        logger.info(f"Headers: {dict(request.headers)}")
+        logger.info(f"Raw data: {request.data.decode('utf-8') if request.data else 'None'}")
+
+        # Try to get JSON data
+        try:
+            data = request.get_json(force=True)  # force=True ignores Content-Type
+            logger.info(f"Parsed JSON data: {data}")
+        except Exception as e:
+            logger.error(f"Failed to parse JSON: {e}")
+            return jsonify({'error': f'Invalid JSON: {str(e)}'}), 400
+
         if not data or 'locations' not in data:
             return jsonify({'error': 'Missing required field: locations'}), 400
 
         locations = data.get('locations', [])
         lang = data.get('lang', 'en')
+
+        logger.info(f"Locations received: {locations} (type: {type(locations)})")
+        logger.info(f"Language: {lang}")
 
         if not locations or not isinstance(locations, list):
             return jsonify({'error': 'locations must be a non-empty array'}), 400
@@ -1040,7 +1056,7 @@ async def get_weather_grid():
         return jsonify(response)
 
     except Exception as e:
-        logger.error(f"Error in weather grid endpoint: {e}")
+        logger.error(f"Error in weather grid endpoint: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
 
 
