@@ -358,25 +358,27 @@ async def fetch_forecast(lat, lon):
 async def fetch_nearby_cities(lat, lon, zoom_level=8):
     """
     Fetch actual major cities using Overpass API and get their weather
-    Radius scales based on zoom level:
-    - zoom 7: ~320km view → 150km radius
-    - zoom 8: ~160km view → 100km radius
-    - zoom 9: ~80km view → 60km radius
-    - zoom 10: ~40km view → 30km radius
+    Radius scales based on zoom level to fill most of the visible map:
+    - zoom 7: ~320km view → 250km radius (fills 78% of map)
+    - zoom 8: ~160km view → 125km radius (fills 78% of map)
+    - zoom 9: ~80km view → 62km radius (fills 78% of map)
+    - zoom 10: ~40km view → 31km radius (fills 78% of map)
     """
     try:
         # Calculate radius based on zoom level
-        # Formula: radius = base_distance / (2 ^ (zoom - 8))
-        # This ensures cities spread across the visible area at any zoom
-        base_radius = 100  # Base radius at zoom 8
+        # Map view distance at each zoom: ~320km / (2^(zoom-7))
+        # Use 78% of visible area for city spread
+        # Formula: radius = (map_view_distance * 0.78) / 2
+        base_radius = 125  # Base radius at zoom 8 (fills ~78% of 160km view)
         radius_km = int(base_radius * (2 ** (8 - zoom_level)))
 
         # Clamp radius to reasonable bounds
-        radius_km = max(30, min(200, radius_km))
+        radius_km = max(30, min(280, radius_km))
 
         # Scale minimum distances based on radius
-        min_distance_from_center = int(radius_km * 0.20)  # 20% of radius
-        min_distance_between_cities = int(radius_km * 0.15)  # 15% of radius
+        # Reduce from center minimum to allow cities closer (better coverage)
+        min_distance_from_center = int(radius_km * 0.12)  # 12% of radius (was 20%)
+        min_distance_between_cities = int(radius_km * 0.18)  # 18% of radius (was 15%)
 
         logger.info(
             f"Zoom {zoom_level}: using radius {radius_km}km, min_from_center {min_distance_from_center}km, min_between {min_distance_between_cities}km")
