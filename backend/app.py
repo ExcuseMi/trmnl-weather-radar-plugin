@@ -26,6 +26,20 @@ ENABLE_IP_WHITELIST = os.getenv('ENABLE_IP_WHITELIST', 'false').lower() == 'true
 # TRMNL server IPs (fetched from https://usetrmnl.com/api/ips on startup)
 TRMNL_IPS = set()
 
+# Load translations
+TRANSLATIONS = {}
+try:
+    with open('/app/translations.json', 'r', encoding='utf-8') as f:
+        TRANSLATIONS = json.load(f)
+except Exception as e:
+    logger.warning(f"Could not load translations: {e}")
+    TRANSLATIONS = {"en": {}}
+
+
+def translate(key, lang='en'):
+    """Get translation for key in specified language, fallback to English"""
+    return TRANSLATIONS.get(lang, {}).get(key) or TRANSLATIONS.get('en', {}).get(key, key)
+
 
 def get_client_ip():
     """Get the real client IP, accounting for proxies and Cloudflare"""
@@ -341,8 +355,104 @@ async def fetch_forecast(lat, lon):
         return None
 
 
-async def fetch_nearby_cities(lat, lon, radius_km=50):
-    """Fetch actual nearby cities using Nominatim reverse geocoding and get their weather"""
+async def fetch_nearby_cities(lat, lon, radius_km=80):
+    """Fetch actual major cities using Overpass API and get their weather"""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Use Overpass API to find cities/towns within radius
+            # Query for places with population data or are marked as cities/towns
+            overpass_query = f"""
+            [out:json][timeout:25];
+            (
+              node["place"="city"](around:{radius_km * 1000},{lat},{lon});
+              node["place"="town"](around:{radius_km * 1000},{lat},{lon});
+            );
+            out body;
+            """
+
+            try:
+                response = await client.post(
+                    'https://overpass-api.de/api/interpreter',
+                    data={'data': overpass_query},
+                    headers={'User-Agent': 'TRMNL-Weather-Plugin/1.0'}
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    elements = data.get('elements', [])
+
+                    logger.info(f"Found {len(elements)} cities/towns from Overpass API")
+
+                    # Sort by population if available, otherwise just take first 8
+                    cities_with_pop = []
+                    for elem in elements:
+                        tags = elem.get('tags', {})
+                        name = tags.get('name')
+                        population = tags.get('population', '0')
+
+                        if name:
+                            try:
+                                pop_int = int(population.replace(',', '').replace('.', ''))
+                            except:
+                                pop_int = 0
+
+                            cities_with_pop.append({
+                                'name': name,
+                                'lat': elem.get('lat'),
+                                'lon': elem.get('lon'),
+                                'population': pop_int
+                            })
+
+                    # Sort by population descending
+                    cities_with_pop.sort(key=lambda x: x['population'], reverse=True)
+
+                    # Take top 8 most populous
+                    top_cities = cities_with_pop[:8]
+
+                    logger.info(f"Selected top {len(top_cities)} cities by population")
+
+                    # Fetch weather for all cities in parallel
+                    weather_tasks = []
+                    for city in top_cities:
+                        weather_tasks.append(fetch_weather(city['lat'], city['lon']))
+
+                    weather_results = await asyncio.gather(*weather_tasks, return_exceptions=True)
+
+                    # Combine city names with weather data
+                    nearby_weather = []
+                    for i, result in enumerate(weather_results):
+                        if isinstance(result, Exception) or result is None:
+                            continue
+
+                        city = top_cities[i]
+                        nearby_weather.append({
+                            'lat': round(city['lat'], 2),
+                            'lon': round(city['lon'], 2),
+                            'name': city['name'],
+                            'temperature': result.get('temperature'),
+                            'weather_code': result.get('weather_code'),
+                            'population': city['population']
+                        })
+
+                    logger.info(
+                        f"Fetched weather for {len(nearby_weather)} nearby cities: {[c['name'] for c in nearby_weather]}")
+                    return nearby_weather
+
+            except Exception as e:
+                logger.warning(f"Overpass API failed: {e}, falling back to directional method")
+                # Fall back to old method if Overpass fails
+                pass
+
+            # Fallback: Use the old directional reverse geocoding method
+            return await fetch_nearby_cities_fallback(lat, lon)
+
+    except Exception as e:
+        logger.error(f"Error fetching nearby cities: {e}")
+        return []
+
+
+async def fetch_nearby_cities_fallback(lat, lon):
+    """Fallback method using directional reverse geocoding"""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             # Use Nominatim's reverse geocoding to find nearby places
@@ -560,16 +670,18 @@ async def get_weather():
     Get weather data for a location
     Query params:
       - address: location address
+      - lang: language code (optional, default: en)
     """
     address = request.args.get('address', type=str)
+    lang = request.args.get('lang', 'en', type=str)
 
     if not address:
-        return jsonify({'error': 'Missing required parameter: address'}), 400
+        return jsonify({'error': translate('error_missing_address', lang)}), 400
 
     # Geocode address
     geocode_result = await geocode_address(address)
     if not geocode_result:
-        return jsonify({'error': f'Could not find location for address: {address}'}), 400
+        return jsonify({'error': f"{translate('error_location_not_found', lang)}: {address}"}), 400
 
     lat = geocode_result['lat']
     lon = geocode_result['lon']
@@ -597,7 +709,7 @@ async def get_weather():
         nearby_data = []
 
     if not weather_data:
-        return jsonify({'error': 'Failed to fetch weather data'}), 500
+        return jsonify({'error': translate('error_fetch_weather', lang)}), 500
 
     # Combine results
     response = {
