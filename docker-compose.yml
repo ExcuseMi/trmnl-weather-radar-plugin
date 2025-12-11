@@ -1,0 +1,14 @@
+services:
+  backend:
+    build: ./backend
+    container_name: trmnl-weather-backend
+    ports:
+      - "5001:5000"
+    volumes:
+      - weather-radar-data:/data
+    environment:
+      - ENABLE_IP_WHITELIST=${ENABLE_IP_WHITELIST:-false}
+    restart: unless-stopped
+
+volumes:
+  weather-radar-data:
