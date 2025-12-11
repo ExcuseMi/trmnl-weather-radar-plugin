@@ -341,6 +341,148 @@ async def fetch_forecast(lat, lon):
         return None
 
 
+async def fetch_nearby_cities(lat, lon, radius_km=50):
+    """Fetch nearby cities using Open-Meteo geocoding API and get their weather"""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Search for cities near the location
+            response = await client.get(
+                'https://geocoding-api.open-meteo.com/v1/search',
+                params={
+                    'name': '',  # Empty to search by coordinates
+                    'count': 10,
+                    'language': 'en',
+                    'format': 'json'
+                }
+            )
+
+            # Instead, let's manually define nearby offset points
+            # We'll check points in a grid around the center
+            nearby_points = []
+            offsets = [
+                (0.3, 0.3),  # NE
+                (0.3, 0),  # E
+                (0.3, -0.3),  # SE
+                (0, -0.3),  # S
+                (-0.3, -0.3),  # SW
+                (-0.3, 0),  # W
+                (-0.3, 0.3),  # NW
+                (0, 0.3),  # N
+            ]
+
+            # Fetch weather for each nearby point
+            tasks = []
+            for offset_lat, offset_lon in offsets:
+                point_lat = lat + offset_lat
+                point_lon = lon + offset_lon
+                tasks.append(fetch_weather(point_lat, point_lon))
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Filter out errors and format results
+            nearby_weather = []
+            for i, result in enumerate(results):
+                if isinstance(result, Exception) or result is None:
+                    continue
+
+                offset_lat, offset_lon = offsets[i]
+                nearby_weather.append({
+                    'lat': round(lat + offset_lat, 2),
+                    'lon': round(lon + offset_lon, 2),
+                    'temperature': result.get('temperature'),
+                    'weather_code': result.get('weather_code')
+                })
+
+            logger.info(f"Fetched weather for {len(nearby_weather)} nearby points")
+            return nearby_weather
+
+    except Exception as e:
+        logger.error(f"Error fetching nearby cities: {e}")
+        return []
+
+
+async def fetch_forecast(lat, lon):
+    """Fetch hourly forecast from Open-Meteo"""
+    # Round coordinates for better cache hits
+    lat_rounded = round(lat, 2)
+    lon_rounded = round(lon, 2)
+
+    # Check cache first
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            'SELECT forecast_json, cached_at FROM forecast_cache WHERE lat = ? AND lon = ?',
+            (lat_rounded, lon_rounded)
+        )
+        row = await cursor.fetchone()
+
+        if row:
+            forecast_json, cached_at = row
+            cached_time = datetime.fromisoformat(cached_at)
+            age = (datetime.now() - cached_time).total_seconds() / 60  # age in minutes
+
+            if age < FORECAST_CACHE_MINUTES:
+                logger.info(f"Forecast cache hit for ({lat_rounded}, {lon_rounded}), age: {age:.1f}m")
+                return json.loads(forecast_json)
+            else:
+                logger.info(f"Forecast cache expired for ({lat_rounded}, {lon_rounded}), age: {age:.1f}m")
+
+    # Fetch from Open-Meteo
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                'https://api.open-meteo.com/v1/forecast',
+                params={
+                    'latitude': lat,
+                    'longitude': lon,
+                    'hourly': 'temperature_2m,precipitation_probability,precipitation,weather_code',
+                    'forecast_days': 2,
+                    'timezone': 'auto'
+                }
+            )
+
+            if response.status_code != 200:
+                logger.error(f"Open-Meteo forecast error: {response.status_code}")
+                return None
+
+            data = response.json()
+            hourly = data.get('hourly', {})
+
+            # Get next 24 hours
+            times = hourly.get('time', [])[:24]
+            temps = hourly.get('temperature_2m', [])[:24]
+            precip_prob = hourly.get('precipitation_probability', [])[:24]
+            precip = hourly.get('precipitation', [])[:24]
+            weather_codes = hourly.get('weather_code', [])[:24]
+
+            result = {
+                'hours': [
+                    {
+                        'time': times[i],
+                        'temperature': temps[i],
+                        'precipitation_probability': precip_prob[i],
+                        'precipitation': precip[i],
+                        'weather_code': weather_codes[i]
+                    }
+                    for i in range(len(times))
+                ]
+            }
+
+            # Cache the result
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    'INSERT OR REPLACE INTO forecast_cache (lat, lon, forecast_json, cached_at) VALUES (?, ?, ?, ?)',
+                    (lat_rounded, lon_rounded, json.dumps(result), datetime.now().isoformat())
+                )
+                await db.commit()
+
+            logger.info(f"Fetched forecast for ({lat}, {lon}): {len(times)} hours")
+            return result
+
+    except Exception as e:
+        logger.error(f"Error fetching forecast: {e}")
+        return None
+
+
 @app.route('/health')
 def health():
     """Health check endpoint"""
@@ -371,10 +513,11 @@ async def get_weather():
 
     logger.info(f"Using geocoded coordinates: {lat}, {lon}")
 
-    # Fetch weather and forecast in parallel
-    weather_data, forecast_data = await asyncio.gather(
+    # Fetch weather, forecast, and nearby cities in parallel
+    weather_data, forecast_data, nearby_data = await asyncio.gather(
         fetch_weather(lat, lon),
         fetch_forecast(lat, lon),
+        fetch_nearby_cities(lat, lon),
         return_exceptions=True
     )
 
@@ -385,6 +528,9 @@ async def get_weather():
     if isinstance(forecast_data, Exception):
         logger.error(f"Error fetching forecast: {forecast_data}")
         forecast_data = None
+    if isinstance(nearby_data, Exception):
+        logger.error(f"Error fetching nearby cities: {nearby_data}")
+        nearby_data = []
 
     if not weather_data:
         return jsonify({'error': 'Failed to fetch weather data'}), 500
@@ -395,7 +541,8 @@ async def get_weather():
         'lat': lat,
         'lon': lon,
         'current': weather_data,
-        'forecast': forecast_data.get('hours', []) if forecast_data else []
+        'forecast': forecast_data.get('hours', []) if forecast_data else [],
+        'nearby': nearby_data if nearby_data else []
     }
 
     return jsonify(response)
