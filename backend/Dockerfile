@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt --break-system-packages
 
 # Copy application
 COPY app.py .
+COPY translations.json .
 
 # Create data directory
 RUN mkdir -p /data
