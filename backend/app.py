@@ -342,58 +342,98 @@ async def fetch_forecast(lat, lon):
 
 
 async def fetch_nearby_cities(lat, lon, radius_km=50):
-    """Fetch nearby cities using Open-Meteo geocoding API and get their weather"""
+    """Fetch actual nearby cities using Nominatim reverse geocoding and get their weather"""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            # Search for cities near the location
-            response = await client.get(
-                'https://geocoding-api.open-meteo.com/v1/search',
-                params={
-                    'name': '',  # Empty to search by coordinates
-                    'count': 10,
-                    'language': 'en',
-                    'format': 'json'
-                }
-            )
+            # Use Nominatim's reverse geocoding to find nearby places
+            # We'll search in 8 directions at ~40km distance
 
-            # Instead, let's manually define nearby offset points
-            # We'll check points in a grid around the center
-            nearby_points = []
-            offsets = [
-                (0.3, 0.3),  # NE
-                (0.3, 0),  # E
-                (0.3, -0.3),  # SE
-                (0, -0.3),  # S
-                (-0.3, -0.3),  # SW
-                (-0.3, 0),  # W
-                (-0.3, 0.3),  # NW
-                (0, 0.3),  # N
+            nearby_cities = []
+            distance_offset = 0.36  # ~40km
+
+            directions = [
+                (0, distance_offset, 'N'),  # North
+                (distance_offset, distance_offset, 'NE'),  # Northeast
+                (distance_offset, 0, 'E'),  # East
+                (distance_offset, -distance_offset, 'SE'),  # Southeast
+                (0, -distance_offset, 'S'),  # South
+                (-distance_offset, -distance_offset, 'SW'),  # Southwest
+                (-distance_offset, 0, 'W'),  # West
+                (-distance_offset, distance_offset, 'NW'),  # Northwest
             ]
 
-            # Fetch weather for each nearby point
-            tasks = []
-            for offset_lat, offset_lon in offsets:
+            # For each direction, do reverse geocoding to find the city/town name
+            for offset_lat, offset_lon, direction in directions:
                 point_lat = lat + offset_lat
                 point_lon = lon + offset_lon
-                tasks.append(fetch_weather(point_lat, point_lon))
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+                try:
+                    # Reverse geocode to get place name
+                    geocode_response = await client.get(
+                        'https://nominatim.openstreetmap.org/reverse',
+                        params={
+                            'lat': point_lat,
+                            'lon': point_lon,
+                            'format': 'json',
+                            'zoom': 10,  # City/town level
+                            'addressdetails': 1
+                        },
+                        headers={'User-Agent': 'TRMNL-Weather-Plugin/1.0'}
+                    )
 
-            # Filter out errors and format results
+                    if geocode_response.status_code == 200:
+                        place_data = geocode_response.json()
+                        address = place_data.get('address', {})
+
+                        # Get city/town name (prefer city, town, village)
+                        place_name = (
+                                address.get('city') or
+                                address.get('town') or
+                                address.get('village') or
+                                address.get('municipality') or
+                                address.get('county') or
+                                place_data.get('name', f'{direction}')
+                        )
+
+                        nearby_cities.append({
+                            'lat': point_lat,
+                            'lon': point_lon,
+                            'name': place_name,
+                            'direction': direction
+                        })
+
+                    # Rate limit: sleep briefly between requests
+                    await asyncio.sleep(0.2)
+
+                except Exception as e:
+                    logger.warning(f"Failed to geocode {direction}: {e}")
+                    continue
+
+            # Now fetch weather for all cities in parallel
+            weather_tasks = []
+            for city in nearby_cities:
+                weather_tasks.append(fetch_weather(city['lat'], city['lon']))
+
+            weather_results = await asyncio.gather(*weather_tasks, return_exceptions=True)
+
+            # Combine city names with weather data
             nearby_weather = []
-            for i, result in enumerate(results):
+            for i, result in enumerate(weather_results):
                 if isinstance(result, Exception) or result is None:
                     continue
 
-                offset_lat, offset_lon = offsets[i]
+                city = nearby_cities[i]
                 nearby_weather.append({
-                    'lat': round(lat + offset_lat, 2),
-                    'lon': round(lon + offset_lon, 2),
+                    'lat': round(city['lat'], 2),
+                    'lon': round(city['lon'], 2),
+                    'name': city['name'],
                     'temperature': result.get('temperature'),
-                    'weather_code': result.get('weather_code')
+                    'weather_code': result.get('weather_code'),
+                    'direction': city['direction']
                 })
 
-            logger.info(f"Fetched weather for {len(nearby_weather)} nearby points")
+            logger.info(
+                f"Fetched weather for {len(nearby_weather)} nearby cities: {[c['name'] for c in nearby_weather]}")
             return nearby_weather
 
     except Exception as e:
