@@ -384,7 +384,25 @@ async def fetch_nearby_cities(lat, lon, radius_km=50):
 
                     if geocode_response.status_code == 200:
                         place_data = geocode_response.json()
+
+                        # Check if this is a valid land location (not water)
+                        # Nominatim returns error or empty address for water
+                        if 'error' in place_data:
+                            logger.info(f"Skipping {direction}: over water/no data")
+                            continue
+
                         address = place_data.get('address', {})
+
+                        # Skip if no valid address components (likely water)
+                        if not address:
+                            logger.info(f"Skipping {direction}: no address data (likely water)")
+                            continue
+
+                        # Check for water-related types
+                        place_type = place_data.get('type', '')
+                        if place_type in ['sea', 'ocean', 'bay', 'water', 'waterway']:
+                            logger.info(f"Skipping {direction}: water body detected")
+                            continue
 
                         # Prefer larger administrative divisions
                         place_name = (
@@ -393,8 +411,13 @@ async def fetch_nearby_cities(lat, lon, radius_km=50):
                                 address.get('state') or
                                 address.get('county') or
                                 address.get('region') or
-                                place_data.get('name', f'{direction}')
+                                place_data.get('name')
                         )
+
+                        # Skip if we couldn't get a valid name
+                        if not place_name or place_name == direction:
+                            logger.info(f"Skipping {direction}: no valid place name")
+                            continue
 
                         nearby_cities.append({
                             'lat': point_lat,
