@@ -401,12 +401,36 @@ async def get_weather():
     return jsonify(response)
 
 
+async def startup():
+    """Startup tasks"""
+    global TRMNL_IPS
+
+    logger.info("Starting TRMNL Weather Radar Plugin...")
+    logger.info(f"Cache duration: {CACHE_MINUTES} minutes (weather), {FORECAST_CACHE_MINUTES} minutes (forecast)")
+    logger.info(f"IP Whitelist enabled: {ENABLE_IP_WHITELIST}")
+
+    # Initialize database
+    await init_db()
+    logger.info("Database initialized")
+
+    # Fetch TRMNL IPs if whitelist enabled
+    if ENABLE_IP_WHITELIST:
+        await fetch_trmnl_ips()
+        logger.info(f"Loaded {len(TRMNL_IPS)} TRMNL server IPs")
+
+    logger.info("Weather Radar API ready!")
+
+
 def create_app():
     """Application factory"""
-    # Run startup tasks
-    asyncio.run(startup())
     return app
 
+
+# Run startup on import (before gunicorn forks workers)
+import sys
+
+if 'gunicorn' in sys.argv[0] or __name__ != '__main__':
+    asyncio.run(startup())
 
 if __name__ == '__main__':
     # For development only
