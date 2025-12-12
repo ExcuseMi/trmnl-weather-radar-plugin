@@ -37,8 +37,32 @@ except Exception as e:
 
 
 def translate(key, lang='en'):
-    """Get translation for key in specified language, fallback to English"""
-    return TRANSLATIONS.get(lang, {}).get(key) or TRANSLATIONS.get('en', {}).get(key, key)
+    """Get translation for key in specified language, supports nested keys with dot notation"""
+    if lang not in TRANSLATIONS:
+        lang = 'en'
+
+    # Handle nested keys like 'weather_codes.0'
+    keys = key.split('.')
+    value = TRANSLATIONS.get(lang, TRANSLATIONS['en'])
+
+    for k in keys:
+        if isinstance(value, dict):
+            value = value.get(k)
+            if value is None:
+                # Try English fallback
+                value = TRANSLATIONS['en']
+                for fk in keys:
+                    if isinstance(value, dict):
+                        value = value.get(fk)
+                        if value is None:
+                            return key
+                    else:
+                        return key
+                return value if value is not None else key
+        else:
+            return key
+
+    return value if value is not None else key
 
 
 def get_client_ip():
@@ -931,24 +955,46 @@ async def get_weather_grid():
         logger.info(f"Weather grid request received")
         logger.info(f"Content-Type: {request.content_type}")
         logger.info(f"Headers: {dict(request.headers)}")
-        logger.info(f"Raw data: {request.data.decode('utf-8') if request.data else 'None'}")
 
-        # Try to get JSON data
+        raw_data = request.data.decode('utf-8') if request.data else 'None'
+        logger.info(f"Raw data: {raw_data}")
+
+        # Try to parse JSON
+        data = None
         try:
-            data = request.get_json(force=True)  # force=True ignores Content-Type
+            data = request.get_json(force=True)
             logger.info(f"Parsed JSON data: {data}")
         except Exception as e:
-            logger.error(f"Failed to parse JSON: {e}")
-            return jsonify({'error': f'Invalid JSON: {str(e)}'}), 400
+            logger.info(f"Failed to parse as JSON directly: {e}")
+
+            # Try to fix malformed JSON where locations isn't properly quoted
+            # Raw: {"locations": [Brussels, Paris], "lang": "en"}
+            # Fixed: {"locations": ["Brussels", "Paris"], "lang": "en"}
+            try:
+                import re
+                # Fix the locations array - add quotes around unquoted items
+                fixed_data = re.sub(
+                    r'\[([^\]]+)\]',  # Find content in brackets
+                    lambda m: '[' + ', '.join(f'"{item.strip()}"' for item in m.group(1).split(',')) + ']',
+                    raw_data
+                )
+                logger.info(f"Attempting to parse fixed JSON: {fixed_data}")
+                data = json.loads(fixed_data)
+                logger.info(f"Successfully parsed fixed JSON: {data}")
+            except Exception as e2:
+                logger.error(f"Failed to parse fixed JSON: {e2}")
+                return jsonify({'error': f'Invalid JSON format. Raw data: {raw_data}'}), 400
 
         if not data or 'locations' not in data:
             return jsonify({'error': 'Missing required field: locations'}), 400
 
         locations = data.get('locations', [])
         lang = data.get('lang', 'en')
+        temp_unit = data.get('temperature_unit', 'celsius')  # celsius or fahrenheit
 
         logger.info(f"Locations received: {locations} (type: {type(locations)})")
         logger.info(f"Language: {lang}")
+        logger.info(f"Temperature unit: {temp_unit}")
 
         if not locations or not isinstance(locations, list):
             return jsonify({'error': 'locations must be a non-empty array'}), 400
@@ -990,12 +1036,24 @@ async def get_weather_grid():
                 continue
 
             loc = valid_locations[i]
+            weather_code = weather.get('weather_code')
+
+            # Get translated weather description
+            weather_description = translate(f'weather_codes.{weather_code}', lang) if weather_code is not None else ''
+
+            # Get temperature and convert if needed
+            temperature = weather.get('temperature')
+            if temperature is not None and temp_unit == 'fahrenheit':
+                temperature = (temperature * 9 / 5) + 32
+
             location_data.append({
                 'name': loc['name'],
                 'lat': round(loc['lat'], 4),
                 'lon': round(loc['lon'], 4),
-                'temperature': weather.get('temperature'),
-                'weather_code': weather.get('weather_code'),
+                'temperature': round(temperature, 1) if temperature is not None else None,
+                'temperature_unit': temp_unit,
+                'weather_code': weather_code,
+                'weather_description': weather_description,
                 'humidity': weather.get('humidity'),
                 'wind_speed': weather.get('wind_speed'),
                 'precipitation': weather.get('precipitation')
