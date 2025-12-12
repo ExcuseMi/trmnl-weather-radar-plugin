@@ -1256,8 +1256,44 @@ async def get_forecast():
             'lat': round(lat, 4),
             'lon': round(lon, 4),
             'current': current_weather,
-            'daily_forecast': daily_forecast
+            'daily_forecast': daily_forecast,
+            'nearby_cities': []  # Will be populated below
         }
+
+        # Fetch nearby cities from Overpass API
+        try:
+            nearby = await get_nearby_cities(lat, lon, zoom_level=9, max_cities=20)
+            if nearby:
+                # Fetch weather for nearby cities in parallel
+                weather_tasks = [fetch_weather(city['lat'], city['lon']) for city in nearby]
+                weather_results = await asyncio.gather(*weather_tasks, return_exceptions=True)
+
+                nearby_with_weather = []
+                for i, city in enumerate(nearby):
+                    weather = weather_results[i]
+                    if isinstance(weather, Exception) or weather is None:
+                        continue
+
+                    city_temp = weather.get('temperature')
+                    city_code = weather.get('weather_code')
+
+                    # Convert temperature if needed
+                    if city_temp is not None and temp_unit == 'fahrenheit':
+                        city_temp = (city_temp * 9 / 5) + 32
+
+                    nearby_with_weather.append({
+                        'name': city['name'],
+                        'lat': round(city['lat'], 4),
+                        'lon': round(city['lon'], 4),
+                        'temperature': round(city_temp, 1) if city_temp is not None else None,
+                        'weather_code': city_code
+                    })
+
+                result['nearby_cities'] = nearby_with_weather
+                logger.info(f"Added {len(nearby_with_weather)} nearby cities")
+        except Exception as e:
+            logger.warning(f"Failed to fetch nearby cities: {e}")
+            # Continue without nearby cities
 
         logger.info(f"Forecast generated for {location_name}: {len(daily_forecast)} days")
         return jsonify(result)
