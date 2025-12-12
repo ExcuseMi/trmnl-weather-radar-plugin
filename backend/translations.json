@@ -6,6 +6,24 @@
     "error_missing_address": "Missing required parameter: address",
     "error_location_not_found": "Could not find location for address",
     "error_fetch_weather": "Failed to fetch weather data",
+    "days": {
+      "monday": "Monday",
+      "tuesday": "Tuesday",
+      "wednesday": "Wednesday",
+      "thursday": "Thursday",
+      "friday": "Friday",
+      "saturday": "Saturday",
+      "sunday": "Sunday"
+    },
+    "days_short": {
+      "monday": "Mon",
+      "tuesday": "Tue",
+      "wednesday": "Wed",
+      "thursday": "Thu",
+      "friday": "Fri",
+      "saturday": "Sat",
+      "sunday": "Sun"
+    },
     "weather_codes": {
       "0": "Clear sky",
       "1": "Mainly clear",
@@ -40,6 +58,24 @@
     "error_missing_address": "Falta el parámetro requerido: dirección",
     "error_location_not_found": "No se pudo encontrar la ubicación para la dirección",
     "error_fetch_weather": "Error al obtener datos meteorológicos",
+    "days": {
+      "monday": "Lunes",
+      "tuesday": "Martes",
+      "wednesday": "Miércoles",
+      "thursday": "Jueves",
+      "friday": "Viernes",
+      "saturday": "Sábado",
+      "sunday": "Domingo"
+    },
+    "days_short": {
+      "monday": "Lun",
+      "tuesday": "Mar",
+      "wednesday": "Mié",
+      "thursday": "Jue",
+      "friday": "Vie",
+      "saturday": "Sáb",
+      "sunday": "Dom"
+    },
     "weather_codes": {
       "0": "Cielo despejado",
       "1": "Mayormente despejado",
@@ -74,6 +110,24 @@
     "error_missing_address": "Paramètre requis manquant: adresse",
     "error_location_not_found": "Impossible de trouver l'emplacement pour l'adresse",
     "error_fetch_weather": "Échec de la récupération des données météo",
+    "days": {
+      "monday": "Lundi",
+      "tuesday": "Mardi",
+      "wednesday": "Mercredi",
+      "thursday": "Jeudi",
+      "friday": "Vendredi",
+      "saturday": "Samedi",
+      "sunday": "Dimanche"
+    },
+    "days_short": {
+      "monday": "Lun",
+      "tuesday": "Mar",
+      "wednesday": "Mer",
+      "thursday": "Jeu",
+      "friday": "Ven",
+      "saturday": "Sam",
+      "sunday": "Dim"
+    },
     "weather_codes": {
       "0": "Ciel dégagé",
       "1": "Principalement dégagé",
@@ -108,6 +162,24 @@
     "error_missing_address": "Erforderlicher Parameter fehlt: Adresse",
     "error_location_not_found": "Standort für Adresse nicht gefunden",
     "error_fetch_weather": "Fehler beim Abrufen der Wetterdaten",
+    "days": {
+      "monday": "Montag",
+      "tuesday": "Dienstag",
+      "wednesday": "Mittwoch",
+      "thursday": "Donnerstag",
+      "friday": "Freitag",
+      "saturday": "Samstag",
+      "sunday": "Sonntag"
+    },
+    "days_short": {
+      "monday": "Mo",
+      "tuesday": "Di",
+      "wednesday": "Mi",
+      "thursday": "Do",
+      "friday": "Fr",
+      "saturday": "Sa",
+      "sunday": "So"
+    },
     "weather_codes": {
       "0": "Klarer Himmel",
       "1": "Überwiegend klar",
@@ -142,6 +214,24 @@
     "error_missing_address": "Ontbrekende vereiste parameter: adres",
     "error_location_not_found": "Kon locatie niet vinden voor adres",
     "error_fetch_weather": "Fout bij ophalen weergegevens",
+    "days": {
+      "monday": "Maandag",
+      "tuesday": "Dinsdag",
+      "wednesday": "Woensdag",
+      "thursday": "Donderdag",
+      "friday": "Vrijdag",
+      "saturday": "Zaterdag",
+      "sunday": "Zondag"
+    },
+    "days_short": {
+      "monday": "Ma",
+      "tuesday": "Di",
+      "wednesday": "Wo",
+      "thursday": "Do",
+      "friday": "Vr",
+      "saturday": "Za",
+      "sunday": "Zo"
+    },
     "weather_codes": {
       "0": "Heldere lucht",
       "1": "Overwegend helder",

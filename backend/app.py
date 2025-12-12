@@ -1118,6 +1118,155 @@ async def get_weather_grid():
         return jsonify({'error': 'Internal server error'}), 500
 
 
+@app.route('/api/forecast', methods=['GET'])
+@require_trmnl_ip
+async def get_forecast():
+    """
+    Get weather forecast for a single location (current + daily forecast)
+
+    Query parameters:
+    - address: Location address (required)
+    - days: Number of forecast days (default: 7, max: 7)
+    - lang: Language code (default: en)
+    - temp_unit: celsius or fahrenheit (default: celsius)
+
+    Response:
+    {
+      "location": "Brussels, Belgium",
+      "lat": 50.85,
+      "lon": 4.35,
+      "current": {
+        "temperature": 11,
+        "weather_code": 0,
+        "weather_description": "Clear sky"
+      },
+      "daily_forecast": [
+        {
+          "date": "2025-12-13",
+          "day_name": "Friday",
+          "weather_code": 0,
+          "weather_description": "Clear sky",
+          "temp_max": 11,
+          "temp_min": 5,
+          "precipitation_probability": 0
+        },
+        ...
+      ]
+    }
+    """
+    try:
+        address = request.args.get('address')
+        days = min(int(request.args.get('days', 7)), 7)  # Max 7 days
+        lang = request.args.get('lang', 'en')
+        temp_unit = request.args.get('temp_unit', 'celsius')
+
+        if not address:
+            return jsonify({'error': translate('error_missing_address', lang)}), 400
+
+        logger.info(f"Forecast request for: {address}, days: {days}, lang: {lang}, unit: {temp_unit}")
+
+        # Geocode address
+        location = await geocode_address(address)
+        if not location:
+            return jsonify({'error': translate('error_location_not_found', lang)}), 404
+
+        lat, lon = location['lat'], location['lon']
+        location_name = location.get('display_name', address)
+
+        # Fetch weather from Open-Meteo
+        async with httpx.AsyncClient() as client:
+            # Get current + daily forecast
+            url = f"https://api.open-meteo.com/v1/forecast"
+            params = {
+                'latitude': lat,
+                'longitude': lon,
+                'current': 'temperature_2m,weather_code,relative_humidity_2m,wind_speed_10m,precipitation',
+                'daily': 'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max',
+                'timezone': 'auto',
+                'forecast_days': days
+            }
+
+            response = await client.get(url, params=params, timeout=10.0)
+            response.raise_for_status()
+            data = response.json()
+
+        # Process current weather
+        current = data.get('current', {})
+        current_temp = current.get('temperature_2m')
+        current_code = current.get('weather_code')
+
+        # Convert temperature if needed
+        if current_temp is not None and temp_unit == 'fahrenheit':
+            current_temp = (current_temp * 9 / 5) + 32
+
+        current_weather = {
+            'temperature': round(current_temp, 1) if current_temp is not None else None,
+            'weather_code': current_code,
+            'weather_description': translate(f'weather_codes.{current_code}', lang) if current_code is not None else '',
+            'humidity': current.get('relative_humidity_2m'),
+            'wind_speed': current.get('wind_speed_10m'),
+            'precipitation': current.get('precipitation')
+        }
+
+        # Process daily forecast
+        daily = data.get('daily', {})
+        dates = daily.get('time', [])
+        weather_codes = daily.get('weather_code', [])
+        temp_max = daily.get('temperature_2m_max', [])
+        temp_min = daily.get('temperature_2m_min', [])
+        precip_prob = daily.get('precipitation_probability_max', [])
+
+        from datetime import datetime
+
+        daily_forecast = []
+        for i in range(len(dates)):
+            # Parse date and get day name
+            date_obj = datetime.fromisoformat(dates[i])
+            day_index = date_obj.weekday()  # 0=Monday, 6=Sunday
+            day_names = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+            day_key = day_names[day_index]
+
+            # Get translated day name
+            day_name = translate(f'days_short.{day_key}', lang)
+
+            # Get temps and convert if needed
+            t_max = temp_max[i] if i < len(temp_max) else None
+            t_min = temp_min[i] if i < len(temp_min) else None
+
+            if temp_unit == 'fahrenheit':
+                if t_max is not None:
+                    t_max = (t_max * 9 / 5) + 32
+                if t_min is not None:
+                    t_min = (t_min * 9 / 5) + 32
+
+            w_code = weather_codes[i] if i < len(weather_codes) else None
+
+            daily_forecast.append({
+                'date': dates[i],
+                'day_name': day_name,
+                'weather_code': w_code,
+                'weather_description': translate(f'weather_codes.{w_code}', lang) if w_code is not None else '',
+                'temp_max': round(t_max, 1) if t_max is not None else None,
+                'temp_min': round(t_min, 1) if t_min is not None else None,
+                'precipitation_probability': precip_prob[i] if i < len(precip_prob) else 0
+            })
+
+        result = {
+            'location': location_name,
+            'lat': round(lat, 4),
+            'lon': round(lon, 4),
+            'current': current_weather,
+            'daily_forecast': daily_forecast
+        }
+
+        logger.info(f"Forecast generated for {location_name}: {len(daily_forecast)} days")
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"Error in forecast endpoint: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+
+
 async def startup():
     """Startup tasks"""
     global TRMNL_IPS
