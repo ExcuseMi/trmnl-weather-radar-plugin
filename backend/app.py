@@ -1262,7 +1262,7 @@ async def get_forecast():
 
         # Fetch nearby cities from Overpass API
         try:
-            nearby = await get_nearby_cities(lat, lon, zoom_level=9, max_cities=20)
+            nearby = await fetch_nearby_cities(lat, lon, zoom_level=9)
             if nearby:
                 # Fetch weather for nearby cities in parallel
                 weather_tasks = [fetch_weather(city['lat'], city['lon']) for city in nearby]
